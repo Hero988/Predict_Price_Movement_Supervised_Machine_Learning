@@ -155,7 +155,6 @@ def add_price_movement_labels(df):
     
     return df
 
-# Function to process the CSV file and add labels
 def process_csv(file_path, output_path):
     # Read the CSV file into a DataFrame
     df = pd.read_csv(file_path)
