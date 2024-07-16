@@ -11,7 +11,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 
 import pandas_ta as ta
-import numpy as np
 
 import matplotlib.pyplot as plt
 import seaborn as sns
