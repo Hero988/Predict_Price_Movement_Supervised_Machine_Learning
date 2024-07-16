@@ -10,6 +10,13 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 
+import pandas_ta as ta
+import numpy as np
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
 import joblib
 
 import xgboost as xgb
@@ -110,6 +117,69 @@ def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
     # Return the prepared DataFrame containing the rates
     return rates_frame
 
+def calculate_indicators(data):
+    bollinger_length=12
+    bollinger_std_dev=1.5
+
+    # Calculate the 50-period simple moving average of the 'close' price
+    data['SMA_50'] = ta.sma(data['close'], length=50)
+    # Calculate the 200-period simple moving average of the 'close' price
+    data['SMA_200'] = ta.sma(data['close'], length=200)
+    
+    # Calculate the 50-period exponential moving average of the 'close' price
+    data['EMA_50'] = ta.ema(data['close'], length=50)
+    # Calculate the 200-period exponential moving average of the 'close' price
+    data['EMA_200'] = ta.ema(data['close'], length=200)
+
+    # Calculate the 9-period exponential moving average for scalping strategies
+    data['EMA_9'] = ta.ema(data['close'], length=9)
+    # Calculate the 21-period exponential moving average for scalping strategies
+    data['EMA_21'] = ta.ema(data['close'], length=21)
+    
+    # Generate original Bollinger Bands with a 20-period SMA and 2 standard deviations
+    original_bollinger = ta.bbands(data['close'], length=20, std=2)
+    # The 20-period simple moving average for the middle band
+    data['SMA_20'] = ta.sma(data['close'], length=20)
+    # Upper and lower bands from the original Bollinger Bands calculation
+    data['Upper Band'] = original_bollinger['BBU_20_2.0']
+    data['Lower Band'] = original_bollinger['BBL_20_2.0']
+
+    # Generate updated Bollinger Bands for scalping with custom length and standard deviation
+    updated_bollinger = ta.bbands(data['close'], length=bollinger_length, std=bollinger_std_dev)
+    # Assign lower, middle, and upper bands for scalping
+    data['Lower Band Scalping'], data['Middle Band Scalping'], data['Upper Band Scalping'] = updated_bollinger['BBL_'+str(bollinger_length)+'_'+str(bollinger_std_dev)], ta.sma(data['close'], length=bollinger_length), updated_bollinger['BBU_'+str(bollinger_length)+'_'+str(bollinger_std_dev)]
+    
+    # Calculate the MACD indicator and its signal line
+    macd = ta.macd(data['close'])
+    data['MACD'] = macd['MACD_12_26_9']
+    data['Signal_Line'] = macd['MACDs_12_26_9']
+    
+    # Calculate the Relative Strength Index (RSI) with the specified window length
+    data[f'RSI_14'] = ta.rsi(data['close'], length=14).round(2)
+
+    # Calculate the Stochastic Oscillator
+    stoch = ta.stoch(data['high'], data['low'], data['close'])
+    data['Stoch_%K'] = stoch['STOCHk_14_3_3']
+    data['Stoch_%D'] = stoch['STOCHd_14_3_3']
+
+    data['close_price_previous'] = data['close'].shift(1)
+    
+    data['close_price_percentage_change'] = data['close'].pct_change() * 100
+    data['close_price_previous_percentage_change'] = data['close_price_percentage_change'].shift(1)
+    
+    # Time-based features
+    data['day_of_week'] = data.index.dayofweek
+    data['month_of_year'] = data.index.month
+
+    # Remove the last row of the DataFrame
+    data = data.drop(data.tail(1).index)
+
+    # Remove rows with missing values
+    data = data.dropna()
+
+    # Return the data with added indicators
+    return data
+
 def save_fx_data(pair, timeframe, directory):
     # Retrieve and store the current date
     current_date = str(datetime.now().date())
@@ -125,6 +195,8 @@ def save_fx_data(pair, timeframe, directory):
 
     # Fetch and prepare the FX data for the specified currency pair and timeframe
     eur_usd_data = fetch_fx_data_mt5(pair, timeframe, start_date_all, end_date_all)
+
+    eur_usd_data = calculate_indicators(eur_usd_data)
 
     # Check if data was successfully fetched
     if eur_usd_data is not None:
@@ -187,7 +259,7 @@ def load_and_preprocess_data(file_path):
 
 def select_features_and_target(df):
     # Define the feature columns and the target column
-    feature_cols = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+    feature_cols = [col for col in df.columns if col not in ['movement', 'time']]
     target_col = 'movement'
     
     # Split the data into features (X) and target (y)
@@ -225,7 +297,7 @@ def train_and_evaluate_model(X, y, model_to_use):
         print(f"Fold {fold} results:")
         print("Accuracy:", accuracy_score(y_test, y_pred))
         print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
-        print("Classification Report:\n", classification_report(y_test, y_pred))
+        print("Classification Report:\n", classification_report(y_test, y_pred, zero_division=0))
         
         fold += 1
     
@@ -346,7 +418,7 @@ if __name__ == "__main__":
             test_data = df[(df['time'] >= test_start_date) & (df['time'] <= test_end_date)]
 
             if not test_data.empty:
-                X_test = test_data[['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
+                X_test = test_data[[col for col in test_data.columns if col not in ['movement', 'time']]]
                 y_test = test_data['movement']
                 
                 # Make predictions
@@ -372,6 +444,26 @@ if __name__ == "__main__":
                 print("Accuracy:", accuracy_score(y_test, y_pred))
                 print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
                 print("Classification Report:\n", classification_report(y_test, y_pred))
+
+                # Filter out 'no change' from y_test and y_pred
+                valid_indices = y_test != label_encoder.transform(['no_change'])[0]
+                filtered_y_test = y_test[valid_indices]
+                filtered_y_pred = y_pred[valid_indices]
+
+                # Exclude 'no change' from the labels
+                filtered_labels = [label for label in label_encoder.classes_ if label != 'no_change']
+
+                # Visualize Confusion Matrix
+                cm = confusion_matrix(filtered_y_test, filtered_y_pred, labels=label_encoder.transform(filtered_labels))
+                plt.figure(figsize=(10, 7))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=filtered_labels, yticklabels=filtered_labels)
+                plt.xlabel('Predicted')
+                plt.ylabel('Actual')
+                plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}')
+                # Save the confusion matrix image to the directory
+                confusion_matrix_image_path = os.path.join(directory, 'confusion_matrix.png')
+                plt.savefig(confusion_matrix_image_path)
+                
             else:
                 print("No data available for the given date range.")
             break
@@ -390,7 +482,7 @@ if __name__ == "__main__":
             data_for_prediction = get_data_for_prediction_for_date(input_file_path, prediction_date)
             
             if data_for_prediction is not None:
-                X_predict = data_for_prediction[['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
+                X_predict = data_for_prediction[[col for col in data_for_prediction.columns if col not in ['movement', 'time']]]
                 # Make a prediction using the model
                 predicted_movement = predict_movement(model, X_predict)
                 predicted_movement = label_encoder.inverse_transform(predicted_movement)
