@@ -9,17 +9,44 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.preprocessing import StandardScaler
 
 import pandas_ta as ta
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import numpy as np
 
 import joblib
 
 import xgboost as xgb
 
+import shutil
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Define LSTM Model using PyTorch
+class LSTMModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
+        super(LSTMModel, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return torch.sigmoid(out)
+    
+# Function to reshape data for LSTM
+def reshape_for_lstm(X, time_steps):
+    return X.reshape((X.shape[0], time_steps, X.shape[1]))
 
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
@@ -170,9 +197,6 @@ def calculate_indicators(data):
     data['day_of_week'] = data.index.dayofweek
     data['month_of_year'] = data.index.month
 
-    # Remove the last row of the DataFrame
-    data = data.drop(data.tail(1).index)
-
     # Remove rows with missing values
     data = data.dropna()
 
@@ -248,11 +272,23 @@ def load_and_preprocess_data(file_path):
     if df.isnull().values.any():
         print("Data contains missing values. Filling missing values with forward fill method.")
         df.fillna(method='ffill', inplace=True)
+
+    # Remove rows where 'movement' is 'no_change'
+    df = df[df['movement'] != 'no_change']
     
     # Encode categorical variables
     global label_encoder
     label_encoder = LabelEncoder()
     df['movement'] = label_encoder.fit_transform(df['movement'])
+
+    # Identify feature columns for scaling (excluding 'time' and 'movement')
+    feature_cols = [col for col in df.columns if col not in ['time', 'movement']]
+
+    # Initialize the scaler
+    scaler = StandardScaler()
+
+    # Fit and transform the feature columns
+    df[feature_cols] = scaler.fit_transform(df[feature_cols])
     
     return df
 
@@ -276,21 +312,61 @@ def train_and_evaluate_model(X, y, model_to_use):
         model = RandomForestClassifier(n_estimators=100, random_state=42)
     elif model_to_use == 'xgboost':
         model = xgb.XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42)
-    elif model_to_use == 'logistic_regression':
-        model = LogisticRegression(max_iter=1000, random_state=42)
+    elif model_to_use == 'LSTM':
+        # Initialize the LSTM model
+        input_dim = X.shape[1]
+        hidden_dim = 50
+        num_layers = 2
+        output_dim = 1
+        time_steps = 1  # Adjust as needed
+        model = LSTMModel(input_dim, hidden_dim, num_layers, output_dim)
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     
+    best_threshold = 0.5  # Default threshold
     fold = 1
     for train_index, test_index in tscv.split(X):
         print(f"Training fold {fold}...")
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
-        # Train the model
-        model.fit(X_train, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test)
+        if model_to_use == 'LSTM':
+            # Convert data to tensors and reshape for LSTM
+            X_train_tensor = torch.tensor(X_train.values, dtype=torch.float32).unsqueeze(1)
+            X_test_tensor = torch.tensor(X_test.values, dtype=torch.float32).unsqueeze(1)
+            y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32)
+            y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32)
+
+            # Train the LSTM model
+            model.train()
+            criterion = nn.BCELoss()
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            epochs = 50
+            for epoch in range(epochs):
+                optimizer.zero_grad()
+                y_train_pred = model(X_train_tensor)
+                loss = criterion(y_train_pred, y_train_tensor.unsqueeze(1))
+                loss.backward()
+                optimizer.step()
+
+            # Evaluate the LSTM model
+            model.eval()
+            with torch.no_grad():
+                y_pred_proba = model(X_test_tensor).numpy().flatten()
+                y_test = y_test_tensor.numpy().flatten()
+
+                # Find the best threshold
+                best_threshold, best_accuracy = find_best_threshold(y_test, y_pred_proba)
+                print(f"Best threshold: {best_threshold}, Best accuracy: {best_accuracy}")
+
+                # Use the best threshold to make final predictions
+                y_pred = (y_pred_proba > best_threshold).astype(int)
+        else:
+            # Train the model
+            model.fit(X_train, y_train)
+            # Make predictions
+            y_pred = model.predict(X_test)
         
         # Evaluate the model
         print(f"Fold {fold} results:")
@@ -300,7 +376,7 @@ def train_and_evaluate_model(X, y, model_to_use):
         
         fold += 1
     
-    return model
+    return model, best_threshold
 
 def save_model(model, filename):
     # Save the model to a file
@@ -311,9 +387,31 @@ def load_model(filename):
     # Load the model from a file
     return joblib.load(filename)
 
-def predict_movement(model, X):
-    # Make predictions using the model
-    return model.predict(X)
+def find_best_threshold(y_true, y_pred_proba):
+    best_threshold = 0.5
+    best_accuracy = 0
+
+    for threshold in np.arange(0.0, 1.0, 0.01):
+        y_pred = (y_pred_proba > threshold).astype(int)
+        accuracy = accuracy_score(y_true, y_pred)
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
+            best_threshold = threshold
+
+    return best_threshold, best_accuracy
+
+def predict_movement(model, X, model_choice, best_threshold):
+    if model_choice == 'LSTM':
+        # Convert data to tensors and reshape for LSTM
+        X = torch.tensor(X.values, dtype=torch.float32).unsqueeze(1)
+        model.eval()
+        with torch.no_grad():
+            y_pred = model(X)
+            y_pred = (y_pred > best_threshold).float().numpy().flatten().astype(int)
+        return y_pred
+    else:
+        # Make predictions using the other models
+        return model.predict(X)
 
 def get_data_for_prediction_for_date(file_path, date):
     # Load the output CSV file
@@ -337,20 +435,109 @@ def create_directory(directory):
         os.makedirs(directory)
     print(f"Directory '{directory}' is ready.")
 
+def train_and_test_model(input_file_path, pair, timeframe, directory, output_file_path, model_choice, model_file_path):
+    if not os.path.exists(input_file_path):
+        # If the file does not exist, fetch and save the FX data
+        save_fx_data(pair, timeframe, directory)
+
+    # Process the CSV file and add labels
+    process_csv(input_file_path, output_file_path)
+
+    # Load and preprocess the data
+    df = load_and_preprocess_data(output_file_path)
+    
+    # Select features and target
+    X, y = select_features_and_target(df)
+    
+    # Train and evaluate the model using TimeSeriesSplit
+    model, best_threshold = train_and_evaluate_model(X, y, model_choice)
+
+    # Save the trained model
+    save_model(model, model_file_path)
+
+    # Load the model for testing
+    model = load_model(model_file_path)
+
+    test_start_date_string = '2022-01-01'
+    test_end_date_string = '2024-07-01'
+
+    # Load and preprocess the data
+    df = load_and_preprocess_data(output_file_path)
+    
+    # Select features and target
+    X, y = select_features_and_target(df)
+
+    # Convert input dates to datetime
+    test_start_date = pd.to_datetime(test_start_date_string)
+    test_end_date = pd.to_datetime(test_end_date_string)
+    
+    # Select test data based on 'time' column
+    test_data = df[(df['time'] >= test_start_date) & (df['time'] <= test_end_date)]
+
+    if not test_data.empty:
+        X_test = test_data[[col for col in test_data.columns if col not in ['movement', 'time']]]
+        y_test = test_data['movement']
+        
+        # Make predictions
+        y_pred = predict_movement(model, X_test, model_choice, best_threshold)
+
+        # Add the predictions to the test_data DataFrame
+        test_data['predicted'] = y_pred
+
+        # Decode the 'movement' and 'predicted' columns
+        test_data['movement'] = label_encoder.inverse_transform(test_data['movement'])
+        test_data['predicted'] = label_encoder.inverse_transform(test_data['predicted'])
+        
+        # Select the relevant columns and save to a new CSV file
+        output_columns = ['time', 'movement', 'predicted']
+        output_data = test_data[output_columns]
+        # Save the DataFrame to a CSV file inside the specified directory
+        output_filename = f'predicted_movement_for_{pair}_{timeframe}_for_dates_{test_start_date_string}_to_{test_end_date_string}.csv'
+        output_filepath = os.path.join(directory, output_filename)
+        output_data.to_csv(output_filepath, index=False)
+
+        accuracy = accuracy_score(y_test, y_pred)
+
+        # Convert accuracy to percentage and round to whole number
+        accuracy_percentage = round(accuracy * 100)
+        
+        # Evaluate predictions
+        print("Testing results:")
+        print("Accuracy:", accuracy_score(y_test, y_pred))
+        print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+        print("Classification Report:\n", classification_report(y_test, y_pred))
+
+        # Visualize Confusion Matrix
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(10, 7))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        if model_choice == "LSTM":
+            plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%, Best threshold: {best_threshold}')
+        else:
+            plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%')
+
+        # Save the confusion matrix image to the directory
+        confusion_matrix_image_path = os.path.join(directory, 'confusion_matrix.png')
+        plt.savefig(confusion_matrix_image_path)
+    else:
+        print("No data available for the given date range.")
+
+    return accuracy_percentage
+
 def menu():
     print("\nMenu:")
-    print("1. Train model and Test Model")
+    print("1. Train model and Test Model on single pair")
     print("2. Predict movement for a specific date")
+    print("3. Train model and Test Model on Multiple Pairs")
     return input("Enter your choice: ")
 
 if __name__ == "__main__":
-    pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
-    timeframe = input("Enter the timeframe (e.g., Daily, 1H): ").strip().upper()
-
     print("Choose the model to use:")
     print("1. Random Forest")
     print("2. XGBoost")
-    print("3. Logistic Regression")
+    print("3. LSTM")
     model_choice_bool = input("Enter your choice (1 or 2): ").strip()
 
     if model_choice_bool == '1':
@@ -358,116 +545,33 @@ if __name__ == "__main__":
     elif model_choice_bool == '2':
         model_choice = 'xgboost'
     elif model_choice_bool == '3':
-        model_choice = 'logistic_regression'
+        model_choice = 'LSTM'
 
-    # Create a new directory to save everything
-    directory = f'{pair}_{timeframe}_{model_choice}'
-    create_directory(directory)
+    choice = menu()
 
-    # Input CSV file path
-    input_file_path = os.path.join(directory, f'{pair}_{timeframe}_data.csv')
-    # Output CSV file path
-    output_file_path = os.path.join(directory, f'{pair}_{timeframe}_labeled_data.csv')
+    if choice == '1' or choice == '2':
+        pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
+        timeframe = input("Enter the timeframe (e.g., Daily, 1H): ").strip().upper()
+        # Create a new directory to save everything
+        directory = f'{pair}_{timeframe}_{model_choice}'
+        create_directory(directory)
 
-    model_file_path = os.path.join(directory, f'{pair}_{timeframe}_price_movement_model.joblib')
+        # Input CSV file path
+        input_file_path = os.path.join(directory, f'{pair}_{timeframe}_data.csv')
+        # Output CSV file path
+        output_file_path = os.path.join(directory, f'{pair}_{timeframe}_labeled_data.csv')
+
+        model_file_path = os.path.join(directory, f'{pair}_{timeframe}_price_movement_model.joblib')
 
     while True:
-        choice = menu()
         if choice == '1':
-            if not os.path.exists(input_file_path):
-                # If the file does not exist, fetch and save the FX data
-                save_fx_data(pair, timeframe, directory)
+            accuracy = train_and_test_model(input_file_path, pair, timeframe, directory, output_file_path, model_choice, model_file_path)
 
-            # Process the CSV file and add labels
-            process_csv(input_file_path, output_file_path)
-
-            # Load and preprocess the data
-            df = load_and_preprocess_data(output_file_path)
-            
-            # Select features and target
-            X, y = select_features_and_target(df)
-            
-            # Train and evaluate the model using TimeSeriesSplit
-            model = train_and_evaluate_model(X, y, model_choice)
-
-            # Save the trained model
-            save_model(model, model_file_path)
-
-            # Load the model for testing
-            model = load_model(model_file_path)
-
-            # Input for testing
-            #test_start_date = input("Enter the start date for testing (YYYY-MM-DD): ").strip()
-            #test_end_date = input("Enter the end date for testing (YYYY-MM-DD): ").strip()
-
-            test_start_date_string = '2024-01-01'
-            test_end_date_string = '2024-07-01'
-
-            # Load and preprocess the data
-            df = load_and_preprocess_data(output_file_path)
-            
-            # Select features and target
-            X, y = select_features_and_target(df)
-
-            # Convert input dates to datetime
-            test_start_date = pd.to_datetime(test_start_date_string)
-            test_end_date = pd.to_datetime(test_end_date_string)
-            
-            # Select test data based on 'time' column
-            test_data = df[(df['time'] >= test_start_date) & (df['time'] <= test_end_date)]
-
-            if not test_data.empty:
-                X_test = test_data[[col for col in test_data.columns if col not in ['movement', 'time']]]
-                y_test = test_data['movement']
-                
-                # Make predictions
-                y_pred = predict_movement(model, X_test)
-
-                # Add the predictions to the test_data DataFrame
-                test_data['predicted'] = y_pred
-
-                # Decode the 'movement' and 'predicted' columns
-                test_data['movement'] = label_encoder.inverse_transform(test_data['movement'])
-                test_data['predicted'] = label_encoder.inverse_transform(test_data['predicted'])
-                
-                # Select the relevant columns and save to a new CSV file
-                output_columns = ['time', 'close', 'movement', 'predicted']
-                output_data = test_data[output_columns]
-                # Save the DataFrame to a CSV file inside the specified directory
-                output_filename = f'predicted_movement_for_{pair}_{timeframe}_for_dates_{test_start_date_string}_to_{test_end_date_string}.csv'
-                output_filepath = os.path.join(directory, output_filename)
-                output_data.to_csv(output_filepath, index=False)
-                
-                # Evaluate predictions
-                print("Testing results:")
-                print("Accuracy:", accuracy_score(y_test, y_pred))
-                print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
-                print("Classification Report:\n", classification_report(y_test, y_pred))
-
-                # Filter out 'no change' from y_test and y_pred
-                valid_indices = y_test != label_encoder.transform(['no_change'])[0]
-                filtered_y_test = y_test[valid_indices]
-                filtered_y_pred = y_pred[valid_indices]
-
-                # Exclude 'no change' from the labels
-                filtered_labels = [label for label in label_encoder.classes_ if label != 'no_change']
-
-                # Visualize Confusion Matrix
-                cm = confusion_matrix(filtered_y_test, filtered_y_pred, labels=label_encoder.transform(filtered_labels))
-                plt.figure(figsize=(10, 7))
-                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=filtered_labels, yticklabels=filtered_labels)
-                plt.xlabel('Predicted')
-                plt.ylabel('Actual')
-                plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}')
-                # Save the confusion matrix image to the directory
-                confusion_matrix_image_path = os.path.join(directory, 'confusion_matrix.png')
-                plt.savefig(confusion_matrix_image_path)
-                
-            else:
-                print("No data available for the given date range.")
+            print(f"Printed Accuracy is {accuracy}%")
             break
 
         if choice == '2':
+            best_threshold = 0
             # Load the model for testing
             model = load_model(model_file_path)
 
@@ -483,11 +587,56 @@ if __name__ == "__main__":
             if data_for_prediction is not None:
                 X_predict = data_for_prediction[[col for col in data_for_prediction.columns if col not in ['movement', 'time']]]
                 # Make a prediction using the model
-                predicted_movement = predict_movement(model, X_predict)
+                predicted_movement = predict_movement(model, X_predict, model_choice, best_threshold)
                 predicted_movement = label_encoder.inverse_transform(predicted_movement)
                 print(f"Predicted movement for {prediction_date.date()}: {predicted_movement[0]}")
             break
 
+        elif choice == '3':
+            pairs = [
+                'EURUSD', 'USDJPY', 'GBPUSD', 'USDCHF', 'USDCAD', 'AUDUSD', 'NZDUSD',
+                'EURJPY', 'GBPJPY', 'EURGBP', 'AUDJPY', 'EURCHF', 'CHFJPY', 'EURCAD',
+                'AUDCAD', 'AUDNZD', 'CADJPY', 'NZDJPY', 'GBPCAD', 'GBPAUD', 'EURNZD',
+                'GBPNZD', 'AUDCHF', 'NZDCHF', 'CADCHF'
+            ]
+            timeframe = input("Enter the timeframe (e.g., Daily, 1H): ").strip().upper()
+
+            highest_accuracy = 0
+            best_directory = None
+
+            # Iterate through each pair and train the model
+            for pair in pairs:
+                directory = f'{pair}_{timeframe}_{model_choice}'
+                create_directory(directory)
+                # Input CSV file path
+                input_file_path = os.path.join(directory, f'{pair}_{timeframe}_data.csv')
+                # Output CSV file path
+                output_file_path = os.path.join(directory, f'{pair}_{timeframe}_labeled_data.csv')
+
+                model_file_path = os.path.join(directory, f'{pair}_{timeframe}_price_movement_model.joblib')
+
+                accuracy = train_and_test_model(input_file_path, pair, timeframe, directory, output_file_path, model_choice, model_file_path)
+
+                print(f"Printed Accuracy for {pair} is {accuracy}%")
+
+                # Check if this is the highest accuracy so far
+                if accuracy > highest_accuracy:
+                    # If a previous best directory exists, delete it
+                    if best_directory:
+                        shutil.rmtree(best_directory)
+                        print(f"Deleted directory {best_directory} with lower accuracy.")
+
+                    # Update highest accuracy and best directory
+                    highest_accuracy = accuracy
+                    best_directory = directory
+
+                # If this is not the best accuracy, delete the current directory
+                else:
+                    shutil.rmtree(directory)
+                    print(f"Deleted directory {directory} with accuracy {accuracy}%.")
+
+            print(f"Highest accuracy achieved: {highest_accuracy}% in directory {best_directory}")
+            break
 
 
 
