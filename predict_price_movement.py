@@ -16,46 +16,19 @@ import pandas_ta as ta
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-import numpy as np
-
 import joblib
 
 import xgboost as xgb
-
 import shutil
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
-# Define LSTM Model using PyTorch
-class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
-        super(LSTMModel, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return torch.sigmoid(out)
-    
-# Function to reshape data for LSTM
-def reshape_for_lstm(X, time_steps):
-    return X.reshape((X.shape[0], time_steps, X.shape[1]))
 
 def fetch_fx_data_mt5(symbol, timeframe_str, start_date, end_date):
 
     # Define your MetaTrader 5 account number
-    account_number = 7855545
+    account_number = 1520308171
     # Define your MetaTrader 5 password
-    password = '5jEi%ppS'
+    password = 'Mp5?cQ9e!5J7*'
     # Define the server name associated with your MT5 account
-    server_name ='Eightcap-Demo'
+    server_name ='FTMO-Demo2'
 
     # Initialize MT5 connection; if it fails, print error message and exit
     if not mt5.initialize():
@@ -312,61 +285,18 @@ def train_and_evaluate_model(X, y, model_to_use):
         model = RandomForestClassifier(n_estimators=100, random_state=42)
     elif model_to_use == 'xgboost':
         model = xgb.XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42)
-    elif model_to_use == 'LSTM':
-        # Initialize the LSTM model
-        input_dim = X.shape[1]
-        hidden_dim = 50
-        num_layers = 2
-        output_dim = 1
-        time_steps = 1  # Adjust as needed
-        model = LSTMModel(input_dim, hidden_dim, num_layers, output_dim)
-        criterion = nn.BCELoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    
-    best_threshold = 0.5  # Default threshold
+    elif model_to_use == 'Logistic_Regression':
+        model = LogisticRegression(max_iter=1000, random_state=42)
     fold = 1
     for train_index, test_index in tscv.split(X):
         print(f"Training fold {fold}...")
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-        
-        if model_to_use == 'LSTM':
-            # Convert data to tensors and reshape for LSTM
-            X_train_tensor = torch.tensor(X_train.values, dtype=torch.float32).unsqueeze(1)
-            X_test_tensor = torch.tensor(X_test.values, dtype=torch.float32).unsqueeze(1)
-            y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32)
-            y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32)
 
-            # Train the LSTM model
-            model.train()
-            criterion = nn.BCELoss()
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-            epochs = 50
-            for epoch in range(epochs):
-                optimizer.zero_grad()
-                y_train_pred = model(X_train_tensor)
-                loss = criterion(y_train_pred, y_train_tensor.unsqueeze(1))
-                loss.backward()
-                optimizer.step()
-
-            # Evaluate the LSTM model
-            model.eval()
-            with torch.no_grad():
-                y_pred_proba = model(X_test_tensor).numpy().flatten()
-                y_test = y_test_tensor.numpy().flatten()
-
-                # Find the best threshold
-                best_threshold, best_accuracy = find_best_threshold(y_test, y_pred_proba)
-                print(f"Best threshold: {best_threshold}, Best accuracy: {best_accuracy}")
-
-                # Use the best threshold to make final predictions
-                y_pred = (y_pred_proba > best_threshold).astype(int)
-        else:
-            # Train the model
-            model.fit(X_train, y_train)
-            # Make predictions
-            y_pred = model.predict(X_test)
+        # Train the model
+        model.fit(X_train, y_train)
+        # Make predictions
+        y_pred = model.predict(X_test)
         
         # Evaluate the model
         print(f"Fold {fold} results:")
@@ -376,7 +306,7 @@ def train_and_evaluate_model(X, y, model_to_use):
         
         fold += 1
     
-    return model, best_threshold
+    return model
 
 def save_model(model, filename):
     # Save the model to a file
@@ -387,31 +317,9 @@ def load_model(filename):
     # Load the model from a file
     return joblib.load(filename)
 
-def find_best_threshold(y_true, y_pred_proba):
-    best_threshold = 0.5
-    best_accuracy = 0
-
-    for threshold in np.arange(0.0, 1.0, 0.01):
-        y_pred = (y_pred_proba > threshold).astype(int)
-        accuracy = accuracy_score(y_true, y_pred)
-        if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            best_threshold = threshold
-
-    return best_threshold, best_accuracy
-
-def predict_movement(model, X, model_choice, best_threshold):
-    if model_choice == 'LSTM':
-        # Convert data to tensors and reshape for LSTM
-        X = torch.tensor(X.values, dtype=torch.float32).unsqueeze(1)
-        model.eval()
-        with torch.no_grad():
-            y_pred = model(X)
-            y_pred = (y_pred > best_threshold).float().numpy().flatten().astype(int)
-        return y_pred
-    else:
-        # Make predictions using the other models
-        return model.predict(X)
+def predict_movement(model, X):
+    # Make predictions using the other models
+    return model.predict(X)
 
 def get_data_for_prediction_for_date(file_path, date):
     # Load the output CSV file
@@ -450,7 +358,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
     X, y = select_features_and_target(df)
     
     # Train and evaluate the model using TimeSeriesSplit
-    model, best_threshold = train_and_evaluate_model(X, y, model_choice)
+    model = train_and_evaluate_model(X, y, model_choice)
 
     # Save the trained model
     save_model(model, model_file_path)
@@ -459,10 +367,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
     model = load_model(model_file_path)
 
     test_start_date_string = '2022-01-01'
-    test_end_date_string = '2024-07-01'
-
-    # Load and preprocess the data
-    df = load_and_preprocess_data(output_file_path)
+    test_end_date_string = '2024-07-17'
     
     # Select features and target
     X, y = select_features_and_target(df)
@@ -479,7 +384,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
         y_test = test_data['movement']
         
         # Make predictions
-        y_pred = predict_movement(model, X_test, model_choice, best_threshold)
+        y_pred = predict_movement(model, X_test)
 
         # Add the predictions to the test_data DataFrame
         test_data['predicted'] = y_pred
@@ -513,10 +418,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
         plt.xlabel('Predicted')
         plt.ylabel('Actual')
-        if model_choice == "LSTM":
-            plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%, Best threshold: {best_threshold}')
-        else:
-            plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%')
+        plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%')
 
         # Save the confusion matrix image to the directory
         confusion_matrix_image_path = os.path.join(directory, 'confusion_matrix.png')
@@ -530,14 +432,14 @@ def menu():
     print("\nMenu:")
     print("1. Train model and Test Model on single pair")
     print("2. Predict movement for a specific date")
-    print("3. Train model and Test Model on Multiple Pairs")
+    print("3. Train Model and Test Model on Multiple Pairs")
     return input("Enter your choice: ")
 
 if __name__ == "__main__":
     print("Choose the model to use:")
     print("1. Random Forest")
     print("2. XGBoost")
-    print("3. LSTM")
+    print("3. Logistic Regression")
     model_choice_bool = input("Enter your choice (1 or 2): ").strip()
 
     if model_choice_bool == '1':
@@ -545,16 +447,19 @@ if __name__ == "__main__":
     elif model_choice_bool == '2':
         model_choice = 'xgboost'
     elif model_choice_bool == '3':
-        model_choice = 'LSTM'
+        model_choice = 'Logistic_Regression'
 
     choice = menu()
 
+
     if choice == '1' or choice == '2':
         pair = input("Enter the currency pair (e.g., GBPUSD, EURUSD): ").strip().upper()
-        timeframe = input("Enter the timeframe (e.g., Daily, 1H): ").strip().upper()
+        timeframe = 'DAILY'
         # Create a new directory to save everything
         directory = f'{pair}_{timeframe}_{model_choice}'
-        create_directory(directory)
+
+        if not os.path.exists(directory):
+            create_directory(directory)
 
         # Input CSV file path
         input_file_path = os.path.join(directory, f'{pair}_{timeframe}_data.csv')
@@ -571,7 +476,7 @@ if __name__ == "__main__":
             break
 
         if choice == '2':
-            best_threshold = 0
+            save_fx_data(pair, timeframe, directory)
             # Load the model for testing
             model = load_model(model_file_path)
 
@@ -587,19 +492,17 @@ if __name__ == "__main__":
             if data_for_prediction is not None:
                 X_predict = data_for_prediction[[col for col in data_for_prediction.columns if col not in ['movement', 'time']]]
                 # Make a prediction using the model
-                predicted_movement = predict_movement(model, X_predict, model_choice, best_threshold)
+                predicted_movement = predict_movement(model, X_predict)
                 predicted_movement = label_encoder.inverse_transform(predicted_movement)
                 print(f"Predicted movement for {prediction_date.date()}: {predicted_movement[0]}")
             break
 
         elif choice == '3':
             pairs = [
-                'EURUSD', 'USDJPY', 'GBPUSD', 'USDCHF', 'USDCAD', 'AUDUSD', 'NZDUSD',
-                'EURJPY', 'GBPJPY', 'EURGBP', 'AUDJPY', 'EURCHF', 'CHFJPY', 'EURCAD',
-                'AUDCAD', 'AUDNZD', 'CADJPY', 'NZDJPY', 'GBPCAD', 'GBPAUD', 'EURNZD',
-                'GBPNZD', 'AUDCHF', 'NZDCHF', 'CADCHF'
+                'AAPL', 'AMZN', 'BABA', 'BAC', 'FB', 'GOOG', 'META', 'MSFT', 'NFLX', 'NVDA', 'PFE', 'RACE', 'T', 'TSLA', 'V', 'WMT', 'ZM',
+                'AIRF', 'ALVG', 'BAYGn', 'DBKGn', 'IBE', 'LVMH', 'VOWG_p'
             ]
-            timeframe = input("Enter the timeframe (e.g., Daily, 1H): ").strip().upper()
+            timeframe = 'DAILY'
 
             highest_accuracy = 0
             best_directory = None
