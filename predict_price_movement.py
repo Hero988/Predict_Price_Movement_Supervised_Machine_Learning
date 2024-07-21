@@ -278,7 +278,7 @@ def select_features_and_target(df):
 
 def train_and_evaluate_model(X, y, model_to_use):
     # Use TimeSeriesSplit for cross-validation
-    tscv = TimeSeriesSplit(n_splits=5)
+    tscv = TimeSeriesSplit(n_splits=20)
 
     if model_to_use == 'random_forest':
         # Initialize the model
@@ -366,7 +366,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
     # Load the model for testing
     model = load_model(model_file_path)
 
-    test_start_date_string = '2022-01-01'
+    test_start_date_string = '2024-01-01'
     test_end_date_string = '2024-07-17'
     
     # Select features and target
@@ -425,6 +425,8 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
         plt.savefig(confusion_matrix_image_path)
     else:
         print("No data available for the given date range.")
+        shutil.rmtree(directory)
+        return None
 
     return accuracy_percentage
 
@@ -487,7 +489,7 @@ if __name__ == "__main__":
             prediction_date = pd.to_datetime(prediction_date)
             
             # Get the data for the specified date
-            data_for_prediction = get_data_for_prediction_for_date(input_file_path, prediction_date)
+            data_for_prediction = get_data_for_prediction_for_date(output_file_path, prediction_date)
             
             if data_for_prediction is not None:
                 X_predict = data_for_prediction[[col for col in data_for_prediction.columns if col not in ['movement', 'time']]]
@@ -522,21 +524,26 @@ if __name__ == "__main__":
 
                 print(f"Printed Accuracy for {pair} is {accuracy}%")
 
-                # Check if this is the highest accuracy so far
-                if accuracy > highest_accuracy:
-                    # If a previous best directory exists, delete it
-                    if best_directory:
-                        shutil.rmtree(best_directory)
-                        print(f"Deleted directory {best_directory} with lower accuracy.")
+                if accuracy is not None:
+                    print(f"Printed Accuracy for {pair} is {accuracy}%")
 
-                    # Update highest accuracy and best directory
-                    highest_accuracy = accuracy
-                    best_directory = directory
+                    # Check if this is the highest accuracy so far
+                    if accuracy > highest_accuracy:
+                        # If a previous best directory exists, delete it
+                        if best_directory:
+                            shutil.rmtree(best_directory)
+                            print(f"Deleted directory {best_directory} with lower accuracy.")
 
-                # If this is not the best accuracy, delete the current directory
+                        # Update highest accuracy and best directory
+                        highest_accuracy = accuracy
+                        best_directory = directory
+
+                    # If this is not the best accuracy, delete the current directory
+                    else:
+                        shutil.rmtree(directory)
+                        print(f"Deleted directory {directory} with accuracy {accuracy}%.")
                 else:
-                    shutil.rmtree(directory)
-                    print(f"Deleted directory {directory} with accuracy {accuracy}%.")
+                    print(f"No data available for {pair}. Deleted directory {directory}.")
 
             print(f"Highest accuracy achieved: {highest_accuracy}% in directory {best_directory}")
             break
