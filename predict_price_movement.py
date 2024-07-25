@@ -418,7 +418,7 @@ def train_and_test_model(input_file_path, pair, timeframe, directory, output_fil
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
         plt.xlabel('Predicted')
         plt.ylabel('Actual')
-        plt.title(f'Confusion Matrix: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%')
+        plt.title(f'Confusion Matrix for {model_choice}: {test_start_date_string} - {test_end_date_string}, Accuracy: {accuracy_percentage}%')
 
         # Save the confusion matrix image to the directory
         confusion_matrix_image_path = os.path.join(directory, 'confusion_matrix.png')
@@ -482,6 +482,10 @@ if __name__ == "__main__":
             # Load the model for testing
             model = load_model(model_file_path)
 
+            # Process the CSV file and add labels
+            process_csv(input_file_path, output_file_path)
+
+            # Load and preprocess the data
             load_and_preprocess_data(output_file_path)
 
             # Input for date-based prediction
